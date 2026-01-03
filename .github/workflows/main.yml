@@ -60,37 +60,64 @@ jobs:
       shell: cmd
       run: nuget restore %SOLUTION_FILE%
 
-    - name: Detect All Build Configurations
-      id: configs
+    - name: Inspect Solution Projects
       shell: pwsh
       run: |
-        $configs = @('Debug', 'Release')
-        
-        # Try to detect configurations from solution file
+        Write-Host "=== ANALYZING SOLUTION FILE ===" -ForegroundColor Cyan
         $solutionContent = Get-Content $env:SOLUTION_FILE -Raw
-        if ($solutionContent -match 'ConfigurationPlatforms') {
-          $configMatches = [regex]::Matches($solutionContent, '(\w+)\|x64')
-          $detectedConfigs = $configMatches | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique
-          if ($detectedConfigs) {
-            $configs = $detectedConfigs
-          }
+        
+        # Extract all project entries
+        $projectPattern = 'Project\("{[^}]+}"\)\s*=\s*"([^"]+)",\s*"([^"]+)"'
+        $projects = [regex]::Matches($solutionContent, $projectPattern)
+        
+        Write-Host "`nFOUND $($projects.Count) PROJECTS:" -ForegroundColor Yellow
+        foreach ($match in $projects) {
+          $projectName = $match.Groups[1].Value
+          $projectPath = $match.Groups[2].Value
+          Write-Host "  - $projectName" -ForegroundColor Green
+          Write-Host "    Path: $projectPath" -ForegroundColor Gray
         }
         
-        Write-Host "Will build configurations: $($configs -join ', ')"
-        echo "configurations=$($configs -join ',')" >> $env:GITHUB_OUTPUT
+        # Check for .vcxproj files
+        Write-Host "`n=== SCANNING FOR ALL .VCXPROJ FILES ===" -ForegroundColor Cyan
+        Get-ChildItem -Path . -Filter "*.vcxproj" -Recurse | ForEach-Object {
+          Write-Host "  Found: $($_.FullName)" -ForegroundColor Yellow
+          
+          # Check if it's an application or driver
+          $content = Get-Content $_.FullName -Raw
+          if ($content -match '<ConfigurationType>([^<]+)</ConfigurationType>') {
+            $type = $matches[1]
+            Write-Host "    Type: $type" -ForegroundColor Cyan
+          }
+        }
 
     - name: Build All Configurations
       shell: cmd
       run: |
         set "DXSDK_DIR=C:\Program Files (x86)\Microsoft DirectX SDK (June 2010)\"
         
-        echo Building Debug configuration...
-        msbuild %SOLUTION_FILE% /p:Configuration=Debug /p:Platform=%BUILD_PLATFORM% /t:Build /m /v:minimal
+        echo ========================================
+        echo Building Debug x64 (THIS BUILDS THE .EXE!)
+        echo ========================================
+        msbuild %SOLUTION_FILE% /p:Configuration=Debug /p:Platform=%BUILD_PLATFORM% /t:Rebuild /m /v:normal
         
-        echo Building Release configuration...
-        msbuild %SOLUTION_FILE% /p:Configuration=Release /p:Platform=%BUILD_PLATFORM% /t:Build /m /v:minimal
+        echo ========================================
+        echo Building Release x64 (THIS BUILDS THE .DLL)
+        echo ========================================
+        msbuild %SOLUTION_FILE% /p:Configuration=Release /p:Platform=%BUILD_PLATFORM% /t:Rebuild /m /v:normal
         
-        echo All configurations built!
+        echo ========================================
+        echo SCANNING FOR OUTPUT FILES
+        echo ========================================
+        echo Debug output:
+        dir /s /b Debug\*.exe Debug\*.dll 2>nul
+        echo.
+        echo Release output:
+        dir /s /b Release\*.exe Release\*.dll 2>nul
+        echo.
+        echo x64 folders:
+        dir /s /b x64\Debug\*.exe x64\Debug\*.dll 2>nul
+        dir /s /b x64\Release\*.exe x64\Release\*.dll 2>nul
 
     - name: Deep Scan for ALL Compiled Files
       id: scan
@@ -235,5 +262,8 @@ jobs:
         Write-Host "`n========================================" -ForegroundColor Green
         Write-Host "BUILD COMPLETE!" -ForegroundColor Green
         Write-Host "========================================" -ForegroundColor Green
-        Write-Host "`nDownload artifacts from the Actions tab"
-        Write-Host "All compiled files organized in COMPLETE-BUILD-PACKAGE"
+        Write-Host "`n⚠️  IMPORTANT: Based on your project config:" -ForegroundColor Yellow
+        Write-Host "   Debug x64   = Builds .EXE (Application)" -ForegroundColor Cyan
+        Write-Host "   Release x64 = Builds .DLL (Library)" -ForegroundColor Cyan
+        Write-Host "`nTo get the EXECUTABLE, download the Debug-Build artifact!" -ForegroundColor Yellow
+        Write-Host "`nAll artifacts available in the Actions tab"
