@@ -1,4 +1,4 @@
-name: Build HWID Spoofer
+name: Build HWID Spoofer - All Configurations
 
 on:
   push:
@@ -9,7 +9,6 @@ on:
 
 env:
   SOLUTION_FILE: xyz.spoofer.final.sln
-  BUILD_CONFIGURATION: Release
   BUILD_PLATFORM: x64
 
 jobs:
@@ -39,7 +38,6 @@ jobs:
       run: |
         if exist "C:\Program Files (x86)\Microsoft DirectX SDK (June 2010)\Include\D3dx9tex.h" (
           echo SUCCESS: DirectX SDK installed correctly
-          echo D3dx9tex.h found
         ) else (
           echo ERROR: DirectX SDK not found!
           exit /b 1
@@ -52,7 +50,7 @@ jobs:
     - name: Download and Install WDK
       shell: cmd
       run: |
-        echo Downloading WDK (this takes 5-10 minutes)...
+        echo Downloading WDK...
         curl -L "https://go.microsoft.com/fwlink/?linkid=2249371" -o "%TEMP%\wdksetup.exe"
         echo Installing WDK...
         "%TEMP%\wdksetup.exe" /features + /quiet /norestart
@@ -62,50 +60,180 @@ jobs:
       shell: cmd
       run: nuget restore %SOLUTION_FILE%
 
-    - name: Build Solution
+    - name: Detect All Build Configurations
+      id: configs
+      shell: pwsh
+      run: |
+        $configs = @('Debug', 'Release')
+        
+        # Try to detect configurations from solution file
+        $solutionContent = Get-Content $env:SOLUTION_FILE -Raw
+        if ($solutionContent -match 'ConfigurationPlatforms') {
+          $configMatches = [regex]::Matches($solutionContent, '(\w+)\|x64')
+          $detectedConfigs = $configMatches | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique
+          if ($detectedConfigs) {
+            $configs = $detectedConfigs
+          }
+        }
+        
+        Write-Host "Will build configurations: $($configs -join ', ')"
+        echo "configurations=$($configs -join ',')" >> $env:GITHUB_OUTPUT
+
+    - name: Build All Configurations
       shell: cmd
       run: |
         set "DXSDK_DIR=C:\Program Files (x86)\Microsoft DirectX SDK (June 2010)\"
-        echo Building with DirectX SDK at: %DXSDK_DIR%
-        msbuild %SOLUTION_FILE% /p:Configuration=%BUILD_CONFIGURATION% /p:Platform=%BUILD_PLATFORM% /m /v:minimal /fl /flp:logfile=build.log;verbosity=detailed
+        
+        echo Building Debug configuration...
+        msbuild %SOLUTION_FILE% /p:Configuration=Debug /p:Platform=%BUILD_PLATFORM% /t:Build /m /v:minimal
+        
+        echo Building Release configuration...
+        msbuild %SOLUTION_FILE% /p:Configuration=Release /p:Platform=%BUILD_PLATFORM% /t:Build /m /v:minimal
+        
+        echo All configurations built!
 
-    - name: Upload Build Log on Failure
-      if: failure()
-      uses: actions/upload-artifact@v4
-      with:
-        name: build-log
-        path: build.log
-        if-no-files-found: ignore
-
-    - name: List Build Output
-      shell: cmd
+    - name: Deep Scan for ALL Compiled Files
+      id: scan
+      shell: pwsh
       run: |
-        echo === Build Output ===
-        dir /s /b *.exe *.sys *.dll 2>nul | findstr /i "%BUILD_CONFIGURATION%"
+        Write-Host "=== DEEP SCANNING FOR COMPILED FILES ===" -ForegroundColor Cyan
+        
+        # Find all compiled files (excluding source code)
+        $compiledExtensions = @('*.exe', '*.dll', '*.sys', '*.inf', '*.cat', '*.pdb', '*.lib', '*.exp')
+        $excludeDirs = @('.git', '.github', 'obj', 'packages', 'node_modules')
+        
+        $allFiles = @()
+        foreach ($ext in $compiledExtensions) {
+          $files = Get-ChildItem -Path . -Filter $ext -Recurse -ErrorAction SilentlyContinue | 
+                   Where-Object { 
+                     $exclude = $false
+                     foreach ($dir in $excludeDirs) {
+                       if ($_.FullName -like "*\$dir\*") { $exclude = $true; break }
+                     }
+                     -not $exclude
+                   }
+          $allFiles += $files
+        }
+        
+        Write-Host "`nFOUND $($allFiles.Count) COMPILED FILES:" -ForegroundColor Green
+        $allFiles | ForEach-Object { Write-Host "  - $($_.FullName)" }
+        
+        # Find .sys files specifically
+        $sysFiles = $allFiles | Where-Object { $_.Extension -eq '.sys' }
+        Write-Host "`nFOUND $($sysFiles.Count) KERNEL DRIVERS (.sys):" -ForegroundColor Yellow
+        $sysFiles | ForEach-Object { Write-Host "  - $($_.FullName)" -ForegroundColor Yellow }
+        
+        # Find .exe files
+        $exeFiles = $allFiles | Where-Object { $_.Extension -eq '.exe' }
+        Write-Host "`nFOUND $($exeFiles.Count) EXECUTABLES (.exe):" -ForegroundColor Cyan
+        $exeFiles | ForEach-Object { Write-Host "  - $($_.FullName)" -ForegroundColor Cyan }
 
-    - name: Upload Usermode Binaries
+    - name: Create Output Directory Structure
+      shell: pwsh
+      run: |
+        New-Item -ItemType Directory -Force -Path "compiled_output"
+        New-Item -ItemType Directory -Force -Path "compiled_output/Debug"
+        New-Item -ItemType Directory -Force -Path "compiled_output/Release"
+        New-Item -ItemType Directory -Force -Path "compiled_output/Drivers"
+        New-Item -ItemType Directory -Force -Path "compiled_output/Executables"
+        New-Item -ItemType Directory -Force -Path "compiled_output/Libraries"
+
+    - name: Organize All Compiled Files
+      shell: pwsh
+      run: |
+        $compiledExtensions = @('*.exe', '*.dll', '*.sys', '*.inf', '*.cat', '*.pdb', '*.lib')
+        $excludeDirs = @('.git', '.github', 'obj', 'packages')
+        
+        foreach ($ext in $compiledExtensions) {
+          Get-ChildItem -Path . -Filter $ext -Recurse -ErrorAction SilentlyContinue | 
+            Where-Object { 
+              $exclude = $false
+              foreach ($dir in $excludeDirs) {
+                if ($_.FullName -like "*\$dir\*") { $exclude = $true; break }
+              }
+              -not $exclude
+            } | ForEach-Object {
+              $file = $_
+              $dest = "compiled_output"
+              
+              # Organize by type
+              if ($file.Extension -eq '.sys' -or $file.Extension -eq '.inf' -or $file.Extension -eq '.cat') {
+                $dest = "compiled_output/Drivers"
+              } elseif ($file.Extension -eq '.exe') {
+                $dest = "compiled_output/Executables"
+              } elseif ($file.Extension -eq '.dll' -or $file.Extension -eq '.lib') {
+                $dest = "compiled_output/Libraries"
+              }
+              
+              # Also organize by configuration
+              if ($file.FullName -like "*\Debug\*") {
+                Copy-Item -Path $file.FullName -Destination "compiled_output/Debug" -Force
+              } elseif ($file.FullName -like "*\Release\*") {
+                Copy-Item -Path $file.FullName -Destination "compiled_output/Release" -Force
+              }
+              
+              Copy-Item -Path $file.FullName -Destination $dest -Force
+              Write-Host "Copied: $($file.Name) -> $dest"
+            }
+        }
+
+    - name: Upload Complete Build Package
       uses: actions/upload-artifact@v4
       with:
-        name: usermode-binaries-x64
-        path: |
-          **/${{ env.BUILD_CONFIGURATION }}/**/*.exe
-          **/${{ env.BUILD_CONFIGURATION }}/**/*.dll
+        name: COMPLETE-BUILD-PACKAGE
+        path: compiled_output/
         if-no-files-found: warn
 
-    - name: Upload Kernel Driver
+    - name: Upload Debug Build
       uses: actions/upload-artifact@v4
       with:
-        name: kernel-driver-x64
+        name: Debug-Build
         path: |
-          **/${{ env.BUILD_CONFIGURATION }}/**/*.sys
-          **/${{ env.BUILD_CONFIGURATION }}/**/*.inf
-          **/${{ env.BUILD_CONFIGURATION }}/**/*.cat
+          **/Debug/**/*.exe
+          **/Debug/**/*.dll
+          **/Debug/**/*.sys
+          **/Debug/**/*.pdb
         if-no-files-found: warn
 
-    - name: Upload Debug Symbols
+    - name: Upload Release Build
       uses: actions/upload-artifact@v4
       with:
-        name: debug-symbols-x64
+        name: Release-Build
         path: |
-          **/${{ env.BUILD_CONFIGURATION }}/**/*.pdb
+          **/Release/**/*.exe
+          **/Release/**/*.dll
+          **/Release/**/*.sys
+          **/Release/**/*.pdb
         if-no-files-found: warn
+
+    - name: Upload ALL Kernel Drivers (.sys)
+      uses: actions/upload-artifact@v4
+      with:
+        name: ALL-KERNEL-DRIVERS
+        path: |
+          **/*.sys
+          **/*.inf
+          **/*.cat
+          !.git/**
+          !obj/**
+        if-no-files-found: warn
+
+    - name: Upload ALL Executables (.exe)
+      uses: actions/upload-artifact@v4
+      with:
+        name: ALL-EXECUTABLES
+        path: |
+          **/*.exe
+          !.git/**
+          !obj/**
+          !packages/**
+        if-no-files-found: warn
+
+    - name: Build Summary
+      shell: pwsh
+      run: |
+        Write-Host "`n========================================" -ForegroundColor Green
+        Write-Host "BUILD COMPLETE!" -ForegroundColor Green
+        Write-Host "========================================" -ForegroundColor Green
+        Write-Host "`nDownload artifacts from the Actions tab"
+        Write-Host "All compiled files organized in COMPLETE-BUILD-PACKAGE"
