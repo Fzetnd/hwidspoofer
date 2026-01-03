@@ -77,25 +77,31 @@ jobs:
     - name: Restore NuGet packages
       run: nuget restore ${{ env.SOLUTION_FILE }}
 
-    - name: Build Usermode Application
+    - name: Verify DirectX SDK Installation
+      shell: pwsh
       run: |
-        msbuild ${{ env.SOLUTION_FILE }} `
-          /p:Configuration=${{ env.BUILD_CONFIGURATION }} `
-          /p:Platform=${{ env.BUILD_PLATFORM }} `
-          /t:xyz_spoofer_final `
-          /m `
-          /v:minimal
+        $dxsdkPath = "C:\Program Files (x86)\Microsoft DirectX SDK (June 2010)"
+        if (Test-Path $dxsdkPath) {
+          Write-Host "DirectX SDK found at: $dxsdkPath" -ForegroundColor Green
+          Write-Host "Include path: $dxsdkPath\Include"
+          Write-Host "Lib path: $dxsdkPath\Lib\x64"
+        } else {
+          Write-Host "DirectX SDK not found!" -ForegroundColor Red
+        }
 
-    - name: Build Kernel Driver
+    - name: Build Solution
+      shell: pwsh
       run: |
+        $dxsdkPath = "C:\Program Files (x86)\Microsoft DirectX SDK (June 2010)"
+        
         msbuild ${{ env.SOLUTION_FILE }} `
           /p:Configuration=${{ env.BUILD_CONFIGURATION }} `
           /p:Platform=${{ env.BUILD_PLATFORM }} `
-          /p:TargetVersion=Windows10 `
-          /p:SignMode=TestSign `
+          /p:DXSDK_DIR="$dxsdkPath\" `
+          /p:IncludePath="$dxsdkPath\Include;$(IncludePath)" `
+          /p:LibraryPath="$dxsdkPath\Lib\x64;$(LibraryPath)" `
           /m `
-          /v:minimal
-      continue-on-error: true
+          /v:normal
 
     - name: List build outputs
       shell: pwsh
@@ -128,36 +134,4 @@ jobs:
         name: debug-symbols-${{ env.BUILD_PLATFORM }}
         path: |
           **/${{ env.BUILD_CONFIGURATION }}/**/*.pdb
-        if-no-files-found: warn
-
-  build-additional-platforms:
-    runs-on: windows-latest
-    strategy:
-      matrix:
-        platform: [Win32, ARM64]
-    
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Setup MSBuild
-      uses: microsoft/setup-msbuild@v2
-
-    - name: Build ${{ matrix.platform }}
-      run: |
-        msbuild ${{ env.SOLUTION_FILE }} `
-          /p:Configuration=${{ env.BUILD_CONFIGURATION }} `
-          /p:Platform=${{ matrix.platform }} `
-          /m `
-          /v:minimal
-      continue-on-error: true
-
-    - name: Upload ${{ matrix.platform }} Binaries
-      uses: actions/upload-artifact@v4
-      with:
-        name: binaries-${{ matrix.platform }}
-        path: |
-          **/${{ env.BUILD_CONFIGURATION }}/**/*.exe
-          **/${{ env.BUILD_CONFIGURATION }}/**/*.sys
-          **/${{ env.BUILD_CONFIGURATION }}/**/*.dll
         if-no-files-found: warn
