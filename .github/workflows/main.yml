@@ -25,94 +25,68 @@ jobs:
     - name: Setup MSBuild
       uses: microsoft/setup-msbuild@v2
 
-    - name: Setup Visual Studio with Driver Development
-      uses: microsoft/setup-msbuild@v2
-      with:
-        vs-version: 'latest'
-
-    - name: Add Visual Studio to PATH
-      shell: pwsh
-      run: |
-        $vsPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
-        echo "$vsPath\MSBuild\Current\Bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-        echo "$vsPath\Common7\IDE" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-
     - name: Install DirectX SDK (June 2010)
-      shell: pwsh
+      shell: cmd
       run: |
-        Write-Host "Downloading DirectX SDK (June 2010)..." -ForegroundColor Cyan
-        $dxsdkUrl = "https://download.microsoft.com/download/A/E/7/AE743F1F-632B-4809-87A9-AA1BB3458E31/DXSDK_Jun10.exe"
-        $dxsdkInstaller = "$env:TEMP\DXSDK_Jun10.exe"
-        
-        Invoke-WebRequest -Uri $dxsdkUrl -OutFile $dxsdkInstaller -UseBasicParsing
-        
-        Write-Host "Installing DirectX SDK..." -ForegroundColor Cyan
-        Start-Process -FilePath $dxsdkInstaller -ArgumentList "/U" -Wait -NoNewWindow
-        
-        # Set environment variables
-        $dxsdkPath = "C:\Program Files (x86)\Microsoft DirectX SDK (June 2010)"
-        echo "DXSDK_DIR=$dxsdkPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-        Write-Host "DirectX SDK installed" -ForegroundColor Green
+        echo Downloading DirectX SDK...
+        curl -L "https://download.microsoft.com/download/A/E/7/AE743F1F-632B-4809-87A9-AA1BB3458E31/DXSDK_Jun10.exe" -o "%TEMP%\DXSDK_Jun10.exe"
+        echo Installing DirectX SDK (this takes 2-3 minutes)...
+        "%TEMP%\DXSDK_Jun10.exe" /U
+        echo DirectX SDK installation complete
 
-    - name: Install Windows SDK and WDK Components
-      shell: pwsh
+    - name: Verify DirectX SDK
+      shell: cmd
       run: |
-        # Install Windows SDK (includes headers/libs needed for driver development)
-        choco install windows-sdk-10-version-2004-all -y
-        
-        # Download and install WDK
-        Write-Host "Downloading WDK..." -ForegroundColor Cyan
-        $wdkUrl = "https://go.microsoft.com/fwlink/?linkid=2249371"
-        $wdkInstaller = "$env:TEMP\wdksetup.exe"
-        
-        try {
-          Invoke-WebRequest -Uri $wdkUrl -OutFile $wdkInstaller -UseBasicParsing -TimeoutSec 300
-          Write-Host "Installing WDK (silent mode)..." -ForegroundColor Cyan
-          Start-Process -FilePath $wdkInstaller -ArgumentList "/features", "+", "/quiet", "/norestart" -Wait -NoNewWindow
-          Write-Host "WDK installed successfully" -ForegroundColor Green
-        } catch {
-          Write-Host "WDK installation failed, attempting build anyway..." -ForegroundColor Yellow
-        }
+        if exist "C:\Program Files (x86)\Microsoft DirectX SDK (June 2010)\Include\D3dx9tex.h" (
+          echo SUCCESS: DirectX SDK installed correctly
+          echo D3dx9tex.h found
+        ) else (
+          echo ERROR: DirectX SDK not found!
+          exit /b 1
+        )
+
+    - name: Install Windows SDK
+      shell: cmd
+      run: choco install windows-sdk-10-version-2004-all -y
+
+    - name: Download and Install WDK
+      shell: cmd
+      run: |
+        echo Downloading WDK (this takes 5-10 minutes)...
+        curl -L "https://go.microsoft.com/fwlink/?linkid=2249371" -o "%TEMP%\wdksetup.exe"
+        echo Installing WDK...
+        "%TEMP%\wdksetup.exe" /features + /quiet /norestart
+        echo WDK installation complete
 
     - name: Restore NuGet packages
-      run: nuget restore ${{ env.SOLUTION_FILE }}
-
-    - name: Verify DirectX SDK Installation
-      shell: pwsh
-      run: |
-        $dxsdkPath = "C:\Program Files (x86)\Microsoft DirectX SDK (June 2010)"
-        if (Test-Path $dxsdkPath) {
-          Write-Host "DirectX SDK found at: $dxsdkPath" -ForegroundColor Green
-          Write-Host "Include path: $dxsdkPath\Include"
-          Write-Host "Lib path: $dxsdkPath\Lib\x64"
-        } else {
-          Write-Host "DirectX SDK not found!" -ForegroundColor Red
-        }
+      shell: cmd
+      run: nuget restore %SOLUTION_FILE%
 
     - name: Build Solution
-      shell: pwsh
+      shell: cmd
       run: |
-        $dxsdkPath = "C:\Program Files (x86)\Microsoft DirectX SDK (June 2010)"
-        
-        msbuild ${{ env.SOLUTION_FILE }} `
-          /p:Configuration=${{ env.BUILD_CONFIGURATION }} `
-          /p:Platform=${{ env.BUILD_PLATFORM }} `
-          /p:DXSDK_DIR="$dxsdkPath\" `
-          "/p:IncludePath=$dxsdkPath\Include;`$(IncludePath)" `
-          "/p:LibraryPath=$dxsdkPath\Lib\x64;`$(LibraryPath)" `
-          /m `
-          /v:normal
+        set "DXSDK_DIR=C:\Program Files (x86)\Microsoft DirectX SDK (June 2010)\"
+        echo Building with DirectX SDK at: %DXSDK_DIR%
+        msbuild %SOLUTION_FILE% /p:Configuration=%BUILD_CONFIGURATION% /p:Platform=%BUILD_PLATFORM% /m /v:minimal /fl /flp:logfile=build.log;verbosity=detailed
 
-    - name: List build outputs
-      shell: pwsh
+    - name: Upload Build Log on Failure
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-log
+        path: build.log
+        if-no-files-found: ignore
+
+    - name: List Build Output
+      shell: cmd
       run: |
-        Write-Host "=== Build Artifacts ===" -ForegroundColor Cyan
-        Get-ChildItem -Path . -Recurse -Include *.exe,*.sys,*.dll | Where-Object { $_.Directory -like "*${{ env.BUILD_CONFIGURATION }}*" }
+        echo === Build Output ===
+        dir /s /b *.exe *.sys *.dll 2>nul | findstr /i "%BUILD_CONFIGURATION%"
 
     - name: Upload Usermode Binaries
       uses: actions/upload-artifact@v4
       with:
-        name: usermode-binaries-${{ env.BUILD_PLATFORM }}
+        name: usermode-binaries-x64
         path: |
           **/${{ env.BUILD_CONFIGURATION }}/**/*.exe
           **/${{ env.BUILD_CONFIGURATION }}/**/*.dll
@@ -121,17 +95,17 @@ jobs:
     - name: Upload Kernel Driver
       uses: actions/upload-artifact@v4
       with:
-        name: kernel-driver-${{ env.BUILD_PLATFORM }}
+        name: kernel-driver-x64
         path: |
           **/${{ env.BUILD_CONFIGURATION }}/**/*.sys
           **/${{ env.BUILD_CONFIGURATION }}/**/*.inf
           **/${{ env.BUILD_CONFIGURATION }}/**/*.cat
         if-no-files-found: warn
 
-    - name: Upload PDB Files
+    - name: Upload Debug Symbols
       uses: actions/upload-artifact@v4
       with:
-        name: debug-symbols-${{ env.BUILD_PLATFORM }}
+        name: debug-symbols-x64
         path: |
           **/${{ env.BUILD_CONFIGURATION }}/**/*.pdb
         if-no-files-found: warn
